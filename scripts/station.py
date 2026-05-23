@@ -117,11 +117,19 @@ class DJEngine:
 class BroadcastEngine:
     def __init__(self):
         self.pi_fm_process = None
-        self.is_first_track = True
+
+    def _create_wav_header(self, sample_rate=44100, channels=2, bits_per_sample=16):
+        import struct
+        # 0xFFFFFFFF indicates unknown/infinite length for data chunks
+        header = b'RIFF' + struct.pack('<I', 0xFFFFFFFF) + b'WAVE'
+        byte_rate = sample_rate * channels * (bits_per_sample // 8)
+        block_align = channels * (bits_per_sample // 8)
+        header += b'fmt ' + struct.pack('<IHHIIHH', 16, 1, channels, sample_rate, byte_rate, block_align, bits_per_sample)
+        header += b'data' + struct.pack('<I', 0xFFFFFFFF)
+        return header
 
     def start_broadcaster(self):
         print(f"Starting pi_fm_rds on frequency {BROADCAST_FREQ}...")
-        # Start pi_fm_rds expecting audio on stdin (-)
         cmd = [
             "sudo", "pi_fm_rds",
             "-freq", BROADCAST_FREQ,
@@ -132,33 +140,24 @@ class BroadcastEngine:
         ]
         try:
             self.pi_fm_process = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-            self.is_first_track = True
+            # Write a generic continuous WAV header so pi_fm_rds never expects the file to end
+            wav_header = self._create_wav_header()
+            self.pi_fm_process.stdin.write(wav_header)
+            self.pi_fm_process.stdin.flush()
         except FileNotFoundError:
-            print("ERROR: pi_fm_rds not found. Ensure it is compiled and accessible in system PATH or update the command path.")
-            # For development on Windows, we'll just simulate it
-            self.pi_fm_process = subprocess.Popen(["python", "-c", "import sys, time; sys.stdin.read()"], stdin=subprocess.PIPE)
+            print("ERROR: pi_fm_rds not found.")
+            self.pi_fm_process = subprocess.Popen(["python3", "-c", "import sys, time; sys.stdin.read()"], stdin=subprocess.PIPE)
 
     def play_audio(self, audio_path):
         if not self.pi_fm_process:
             return
 
         print(f"Playing: {audio_path}")
-        # Use sox to convert any audio (MP3/WAV) to standard 44.1kHz 16-bit stereo WAV
-        sox_cmd = ["sox", audio_path, "-t", "wav", "-r", "44100", "-c", "2", "-b", "16", "-"]
+        # Convert audio to RAW headerless PCM matching our WAV header
+        sox_cmd = ["sox", audio_path, "-t", "raw", "-r", "44100", "-c", "2", "-b", "16", "-e", "signed", "-"]
         sox_proc = subprocess.Popen(sox_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         
-        # Read the first 44 bytes (WAV header)
-        header = sox_proc.stdout.read(44)
-        if self.is_first_track:
-            try:
-                self.pi_fm_process.stdin.write(header)
-                self.pi_fm_process.stdin.flush()
-                self.is_first_track = False
-            except BrokenPipeError:
-                print("Broadcaster pipeline broken.")
-                return
-        
-        # Stream the rest of the raw PCM audio seamlessly into the pipe 
+        # Stream the raw PCM seamlessly into the pipe
         try:
             while True:
                 chunk = sox_proc.stdout.read(4096)
@@ -167,7 +166,8 @@ class BroadcastEngine:
                 self.pi_fm_process.stdin.write(chunk)
                 self.pi_fm_process.stdin.flush()
         except BrokenPipeError:
-            print("Broadcaster pipeline broken during playback.")
+            print("Broadcaster pipeline broken during playback. The transmitter may have crashed.")
+            self.pi_fm_process = None
         
         sox_proc.wait()
 
