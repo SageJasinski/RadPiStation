@@ -1,0 +1,14 @@
+[Unit]
+Description=RadPiStation Broadcasting Service
+After=network.target
+
+[Service]
+Type=simple
+User=radpi
+WorkingDirectory=/home/radpi/RadPiStation
+ExecStart=/home/radpi/RadPiStation/venv/bin/python3 scripts/station.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
